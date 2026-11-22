@@ -2,11 +2,13 @@ package com.magesh.downloader.viewmodel
 
 import android.app.Application
 import android.net.Uri
+import android.text.Html
 import android.util.Patterns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.magesh.downloader.EngineInitState
 import com.magesh.downloader.MageshDownloaderApp
+import com.magesh.downloader.cookies.CookieHelper
 import com.magesh.downloader.download.DownloadService
 import com.magesh.downloader.model.DownloadProgressState
 import com.magesh.downloader.model.FetchedMedia
@@ -22,26 +24,89 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
 
 data class UiState(
     val urlInput: String = "",
     val isFetching: Boolean = false,
+    val isUpdatingEngine: Boolean = false,
+    val statusBanner: String? = null,
+    val hasCookies: Boolean = false,
     val errorMessage: String? = null,
     val fetchedMedia: FetchedMedia? = null
 )
 
 class DownloaderViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val _uiState = MutableStateFlow(UiState())
+    private val _uiState = MutableStateFlow(
+        UiState(hasCookies = CookieHelper.getCookiesFileIfValid(application) != null)
+    )
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     val downloadState: StateFlow<DownloadProgressState> = DownloadService.state
     val engineInitState: StateFlow<EngineInitState> = MageshDownloaderApp.initState
 
+    fun refreshCookieStatus() {
+        val exists = CookieHelper.getCookiesFileIfValid(getApplication()) != null
+        _uiState.value = _uiState.value.copy(hasCookies = exists)
+    }
+
+    fun onCookiesSaved(saved: Boolean) {
+        refreshCookieStatus()
+        _uiState.value = _uiState.value.copy(
+            statusBanner = if (saved) {
+                "Account cookies saved. Tap Fetch to retry."
+            } else {
+                "No session cookies found. Make sure you completed login."
+            },
+            errorMessage = null
+        )
+    }
+
+    fun onCookiesCleared() {
+        refreshCookieStatus()
+        _uiState.value = _uiState.value.copy(
+            statusBanner = "Saved cookies cleared."
+        )
+    }
+
+    fun updateYtDlp() {
+        if (_uiState.value.isUpdatingEngine) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                isUpdatingEngine = true,
+                statusBanner = "Updating yt-dlp extractors..."
+            )
+            try {
+                val status = withContext(Dispatchers.IO) {
+                    YoutubeDL.getInstance().updateYoutubeDL(
+                        getApplication(),
+                        YoutubeDL.UpdateChannel.STABLE
+                    )
+                }
+                _uiState.value = _uiState.value.copy(
+                    isUpdatingEngine = false,
+                    statusBanner = when (status) {
+                        YoutubeDL.UpdateStatus.DONE -> "yt-dlp updated to latest version!"
+                        YoutubeDL.UpdateStatus.ALREADY_UP_TO_DATE -> "yt-dlp is already up to date."
+                        else -> "yt-dlp update check finished."
+                    }
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isUpdatingEngine = false,
+                    statusBanner = "yt-dlp update failed: ${e.localizedMessage ?: "Network error"}"
+                )
+            }
+        }
+    }
+
     fun onUrlChange(newUrl: String) {
         _uiState.value = _uiState.value.copy(
             urlInput = newUrl,
-            errorMessage = null
+            errorMessage = null,
+            statusBanner = null
         )
     }
 
@@ -49,6 +114,7 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.value = _uiState.value.copy(
             urlInput = "",
             errorMessage = null,
+            statusBanner = null,
             fetchedMedia = null
         )
     }
@@ -58,13 +124,14 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         val extracted = extractFirstUrl(sharedText) ?: sharedText.trim()
         _uiState.value = _uiState.value.copy(
             urlInput = extracted,
-            errorMessage = null
+            errorMessage = null,
+            statusBanner = null
         )
-        if (isValidPublicUrl(extracted)) {
+        if (isValidUrl(extracted)) {
             fetchFormats()
         } else {
             _uiState.value = _uiState.value.copy(
-                errorMessage = "Shared text does not contain a valid video link."
+                errorMessage = "Shared text does not contain a valid media link."
             )
         }
     }
@@ -80,7 +147,7 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
             return
         }
 
-        if (!isValidPublicUrl(cleanUrl)) {
+        if (!isValidUrl(cleanUrl)) {
             _uiState.value = _uiState.value.copy(
                 errorMessage = "Invalid URL. Please enter a valid https:// link."
             )
@@ -92,10 +159,10 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                 urlInput = cleanUrl,
                 isFetching = true,
                 errorMessage = null,
+                statusBanner = null,
                 fetchedMedia = null
             )
 
-            // Wait for YoutubeDL + FFmpeg initialization if still in progress
             val initResult = MageshDownloaderApp.initState.first {
                 it !is EngineInitState.Initializing
             }
@@ -109,25 +176,35 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
 
             try {
                 val media = withContext(Dispatchers.IO) {
+                    val cookiesFile = CookieHelper.getCookiesFileIfValid(getApplication())
                     val request = YoutubeDLRequest(cleanUrl).apply {
                         addOption("--no-playlist")
+                        if (cookiesFile != null) {
+                            addOption("--cookies", cookiesFile.absolutePath)
+                        }
                     }
-                    val info = YoutubeDL.getInstance().getInfo(request)
-                    val formatsList = info.formats ?: emptyList()
 
-                    val previewUrl = pickPreviewStreamUrl(formatsList, info.url)
-                    val options = buildFormatOptions(formatsList)
+                    try {
+                        val info = YoutubeDL.getInstance().getInfo(request)
+                        val formatsList = info.formats ?: emptyList()
+                        val previewUrl = pickPreviewStreamUrl(formatsList, info.url)
+                        val options = buildFormatOptions(formatsList, info.thumbnail)
 
-                    FetchedMedia(
-                        sourceUrl = cleanUrl,
-                        platform = detectPlatform(cleanUrl),
-                        title = info.title?.takeIf { it.isNotBlank() } ?: "Untitled Video",
-                        uploader = info.uploader?.takeIf { it.isNotBlank() },
-                        durationSeconds = info.duration.toLong(),
-                        thumbnailUrl = info.thumbnail,
-                        previewStreamUrl = previewUrl,
-                        formats = options
-                    )
+                        FetchedMedia(
+                            sourceUrl = cleanUrl,
+                            platform = detectPlatform(cleanUrl),
+                            title = info.title?.takeIf { it.isNotBlank() } ?: "Untitled Media",
+                            uploader = info.uploader?.takeIf { it.isNotBlank() },
+                            durationSeconds = info.duration.toLong(),
+                            thumbnailUrl = info.thumbnail,
+                            previewStreamUrl = previewUrl,
+                            formats = options
+                        )
+                    } catch (ytdlError: Exception) {
+                        // Fallback for picture-only posts (Instagram photos, Facebook photos, etc.)
+                        val imageMedia = fallbackExtractImages(cleanUrl)
+                        imageMedia ?: throw ytdlError
+                    }
                 }
 
                 _uiState.value = _uiState.value.copy(
@@ -155,7 +232,9 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
             resolutionTag = option.resolutionTag,
             formatSelector = option.formatSelector,
             isAudioOnly = option.isAudioOnly,
-            audioFormat = option.audioFormat
+            isImage = option.isImage,
+            audioFormat = option.audioFormat,
+            directImageUrl = option.directImageUrl
         )
     }
 
@@ -164,6 +243,94 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
             context = getApplication(),
             processId = downloadState.value.processId
         )
+    }
+
+    private fun fallbackExtractImages(url: String): FetchedMedia? {
+        return try {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 12000
+                readTimeout = 15000
+                instanceFollowRedirects = true
+                setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                )
+                CookieHelper.getCookieHeaderForUrl(url)?.let {
+                    setRequestProperty("Cookie", it)
+                }
+            }
+            conn.connect()
+            if (conn.responseCode !in 200..299) return null
+
+            val html = conn.inputStream.bufferedReader().use { it.readText() }
+            val imageUrls = linkedSetOf<String>()
+
+            val ogImageRegex = Regex(
+                """<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            )
+            val twitterImageRegex = Regex(
+                """<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            )
+            val displayUrlRegex = Regex(""""display_url"\s*:\s*"([^"]+)"""")
+
+            listOf(ogImageRegex, twitterImageRegex, displayUrlRegex).forEach { regex ->
+                regex.findAll(html).forEach { match ->
+                    val raw = match.groupValues[1]
+                        .replace("\\u0026", "&")
+                        .replace("\\/", "/")
+                    val decoded = Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString()
+                    if (decoded.startsWith("http") &&
+                        !decoded.contains("rsrc.php") &&
+                        !decoded.contains("static.cdninstagram.com/rsrc")
+                    ) {
+                        imageUrls.add(decoded)
+                    }
+                }
+            }
+
+            if (imageUrls.isEmpty()) return null
+
+            val titleMatch = Regex(
+                """<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            ).find(html)?.groupValues?.getOrNull(1)
+            val title = titleMatch?.let {
+                Html.fromHtml(it, Html.FROM_HTML_MODE_LEGACY).toString().trim()
+            }?.takeIf { it.isNotBlank() } ?: "Picture Post"
+
+            val options = imageUrls.mapIndexed { index, imgUrl ->
+                val label = if (imageUrls.size == 1) {
+                    "Picture / Image • JPG"
+                } else {
+                    "Picture ${index + 1} • JPG"
+                }
+                FormatOption(
+                    id = "img_$index",
+                    label = label,
+                    resolutionTag = "JPG",
+                    container = "JPG",
+                    sizeBytes = 0L,
+                    formattedSize = "Original Quality",
+                    isImage = true,
+                    directImageUrl = imgUrl
+                )
+            }
+
+            FetchedMedia(
+                sourceUrl = url,
+                platform = detectPlatform(url),
+                title = title,
+                uploader = null,
+                durationSeconds = 0L,
+                thumbnailUrl = imageUrls.first(),
+                previewStreamUrl = null,
+                formats = options
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun pickPreviewStreamUrl(
@@ -184,7 +351,10 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         return progressive.firstOrNull()?.url ?: fallbackUrl
     }
 
-    private fun buildFormatOptions(formats: List<VideoFormat>): List<FormatOption> {
+    private fun buildFormatOptions(
+        formats: List<VideoFormat>,
+        thumbnailUrl: String?
+    ): List<FormatOption> {
         val bestAudio = formats
             .filter {
                 (it.vcodec == null || it.vcodec == "none") &&
@@ -296,6 +466,22 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
             )
         )
 
+        // Cover / Thumbnail Picture option
+        if (!thumbnailUrl.isNullOrBlank()) {
+            options.add(
+                FormatOption(
+                    id = "image_thumb",
+                    label = "Thumbnail / Cover Picture • JPG",
+                    resolutionTag = "JPG",
+                    container = "JPG",
+                    sizeBytes = 0L,
+                    formattedSize = "Original Image",
+                    isImage = true,
+                    directImageUrl = thumbnailUrl
+                )
+            )
+        }
+
         return options
     }
 
@@ -304,7 +490,7 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         return regex.find(text)?.value
     }
 
-    private fun isValidPublicUrl(url: String): Boolean {
+    private fun isValidUrl(url: String): Boolean {
         if (!url.startsWith("http://", ignoreCase = true) &&
             !url.startsWith("https://", ignoreCase = true)
         ) {
@@ -329,17 +515,17 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         return when {
             lower.contains("private") || lower.contains("login") ||
                 lower.contains("sign in") || lower.contains("cookies") ||
-                lower.contains("authentication") ->
-                "This link appears to be private or requires login. Only public YouTube, Instagram, and Facebook links are supported."
+                lower.contains("rate-limit") || lower.contains("authentication") ->
+                "Login required or rate-limited. Tap the Key icon in the top bar to sign in to your account, then tap Fetch again."
             lower.contains("unsupported url") || lower.contains("no suitable") ->
-                "Unsupported or invalid link. Please check the URL and try again."
+                "Unsupported or invalid link. Please check the URL or tap the Update icon to update yt-dlp."
             lower.contains("unavailable") || lower.contains("404") ||
                 lower.contains("removed") || lower.contains("not found") ->
-                "Video is unavailable or has been removed."
+                "Media is unavailable or has been removed."
             lower.contains("unable to resolve host") || lower.contains("network") ||
                 lower.contains("timed out") ->
                 "Network error. Please check your internet connection and try again."
-            else -> "Could not fetch formats: ${raw.take(160).ifBlank { "Unknown error" }}"
+            else -> "Could not fetch media: ${raw.take(160).ifBlank { "Unknown error" }}"
         }
     }
 }

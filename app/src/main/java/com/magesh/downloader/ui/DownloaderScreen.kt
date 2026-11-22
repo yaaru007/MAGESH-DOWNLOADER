@@ -26,9 +26,12 @@ import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SystemUpdateAlt
+import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -78,11 +81,29 @@ fun DownloaderScreen(
     onClearUrl: () -> Unit,
     onFetchClick: () -> Unit,
     onDownloadClick: (FormatOption) -> Unit,
-    onCancelDownload: () -> Unit
+    onCancelDownload: () -> Unit,
+    onUpdateEngineClick: () -> Unit,
+    onCookiesSaved: (Boolean) -> Unit,
+    onCookiesCleared: () -> Unit
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
     var showVideoPlayer by remember(uiState.fetchedMedia?.sourceUrl) { mutableStateOf(false) }
+    var showLoginDialog by remember { mutableStateOf(false) }
+
+    if (showLoginDialog) {
+        LoginWebViewDialog(
+            onDismiss = { showLoginDialog = false },
+            onCookiesSaved = { saved ->
+                showLoginDialog = false
+                onCookiesSaved(saved)
+            },
+            onCookiesCleared = {
+                showLoginDialog = false
+                onCookiesCleared()
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -95,10 +116,47 @@ fun DownloaderScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "YouTube • Instagram • Facebook",
+                            text = if (uiState.hasCookies) {
+                                "YouTube • Instagram • Facebook • Signed In"
+                            } else {
+                                "YouTube • Instagram • Facebook"
+                            },
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (uiState.hasCookies) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showLoginDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Rounded.VpnKey,
+                            contentDescription = "Account Login / Cookies",
+                            tint = if (uiState.hasCookies) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                    IconButton(
+                        onClick = onUpdateEngineClick,
+                        enabled = !uiState.isUpdatingEngine
+                    ) {
+                        if (uiState.isUpdatingEngine) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.SystemUpdateAlt,
+                                contentDescription = "Update yt-dlp"
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -138,6 +196,21 @@ fun DownloaderScreen(
                 }
             }
 
+            uiState.statusBanner?.let { banner ->
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = banner,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+
             // URL Input + Paste + Fetch
             Card(
                 colors = CardDefaults.cardColors(
@@ -154,7 +227,7 @@ fun DownloaderScreen(
                     OutlinedTextField(
                         value = uiState.urlInput,
                         onValueChange = onUrlChange,
-                        label = { Text("Paste public video link") },
+                        label = { Text("Paste video or picture link") },
                         placeholder = { Text("https://youtube.com/... or instagram.com/...") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
@@ -233,23 +306,40 @@ fun DownloaderScreen(
                     ),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(12.dp),
-                        verticalAlignment = Alignment.Top,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ErrorOutline,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error
-                        )
+                        Row(
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ErrorOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                text = error,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        if (error.contains("Sign in", ignoreCase = true) ||
+                            error.contains("Login", ignoreCase = true)
+                        ) {
+                            OutlinedButton(onClick = { showLoginDialog = true }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.VpnKey,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Sign in with Account")
+                            }
+                        }
                     }
                 }
             }
@@ -279,7 +369,7 @@ fun DownloaderScreen(
                             .padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        if (showVideoPlayer) {
+                        if (showVideoPlayer && !media.previewStreamUrl.isNullOrBlank()) {
                             VideoPreviewPlayer(streamUrl = media.previewStreamUrl)
                         } else {
                             Box(
@@ -296,15 +386,17 @@ fun DownloaderScreen(
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier.fillMaxSize()
                                 )
-                                FilledTonalButton(
-                                    onClick = { showVideoPlayer = true }
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.PlayArrow,
-                                        contentDescription = "Preview Video"
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Preview Video")
+                                if (!media.previewStreamUrl.isNullOrBlank()) {
+                                    FilledTonalButton(
+                                        onClick = { showVideoPlayer = true }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PlayArrow,
+                                            contentDescription = "Preview Video"
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Preview Video")
+                                    }
                                 }
                             }
                         }
@@ -395,16 +487,16 @@ private fun FormatRowCard(
                 modifier = Modifier.weight(1f)
             ) {
                 Icon(
-                    imageVector = if (option.isAudioOnly) {
-                        Icons.Rounded.AudioFile
-                    } else {
-                        Icons.Rounded.Movie
+                    imageVector = when {
+                        option.isImage -> Icons.Rounded.Image
+                        option.isAudioOnly -> Icons.Rounded.AudioFile
+                        else -> Icons.Rounded.Movie
                     },
                     contentDescription = null,
-                    tint = if (option.isAudioOnly) {
-                        MaterialTheme.colorScheme.secondary
-                    } else {
-                        MaterialTheme.colorScheme.primary
+                    tint = when {
+                        option.isImage -> MaterialTheme.colorScheme.tertiary
+                        option.isAudioOnly -> MaterialTheme.colorScheme.secondary
+                        else -> MaterialTheme.colorScheme.primary
                     }
                 )
                 Column {

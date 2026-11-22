@@ -9,9 +9,11 @@ data class FormatOption(
     val container: String,
     val sizeBytes: Long,
     val formattedSize: String,
-    val isAudioOnly: Boolean,
+    val isAudioOnly: Boolean = false,
+    val isImage: Boolean = false,
     val audioFormat: String? = null,
-    val formatSelector: String
+    val directImageUrl: String? = null,
+    val formatSelector: String = "best"
 )
 
 data class FetchedMedia(

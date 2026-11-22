@@ -13,6 +13,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.magesh.downloader.MageshDownloaderApp
 import com.magesh.downloader.MainActivity
+import com.magesh.downloader.cookies.CookieHelper
 import com.magesh.downloader.model.DownloadProgressState
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -26,6 +27,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -41,12 +45,14 @@ class DownloadService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
-                val title = intent.getStringExtra(EXTRA_TITLE) ?: "Video"
+                val title = intent.getStringExtra(EXTRA_TITLE) ?: "Media"
                 val formatLabel = intent.getStringExtra(EXTRA_FORMAT_LABEL) ?: "MP4"
                 val resolutionTag = intent.getStringExtra(EXTRA_RESOLUTION_TAG) ?: "Best"
                 val formatSelector = intent.getStringExtra(EXTRA_FORMAT_SELECTOR) ?: "best"
                 val isAudioOnly = intent.getBooleanExtra(EXTRA_IS_AUDIO_ONLY, false)
+                val isImage = intent.getBooleanExtra(EXTRA_IS_IMAGE, false)
                 val audioFormat = intent.getStringExtra(EXTRA_AUDIO_FORMAT)
+                val directImageUrl = intent.getStringExtra(EXTRA_DIRECT_IMAGE_URL)
 
                 startDownload(
                     url = url,
@@ -55,7 +61,9 @@ class DownloadService : Service() {
                     resolutionTag = resolutionTag,
                     formatSelector = formatSelector,
                     isAudioOnly = isAudioOnly,
-                    audioFormat = audioFormat
+                    isImage = isImage,
+                    audioFormat = audioFormat,
+                    directImageUrl = directImageUrl
                 )
             }
             ACTION_CANCEL -> {
@@ -74,7 +82,9 @@ class DownloadService : Service() {
         resolutionTag: String,
         formatSelector: String,
         isAudioOnly: Boolean,
-        audioFormat: String?
+        isImage: Boolean,
+        audioFormat: String?,
+        directImageUrl: String?
     ) {
         downloadJob?.cancel()
         val processId = "magesh_dl_${UUID.randomUUID()}"
@@ -119,58 +129,71 @@ class DownloadService : Service() {
                     targetDir.mkdirs()
                 }
 
-                val request = YoutubeDLRequest(url).apply {
-                    addOption("--no-mtime")
-                    addOption("--no-playlist")
-                    if (isAudioOnly) {
-                        val fmt = audioFormat ?: "mp3"
-                        addOption("-x")
-                        addOption("--audio-format", fmt)
-                        addOption("--audio-quality", "0")
-                        addOption(
-                            "-o",
-                            "${targetDir.absolutePath}/%(title).100B [Audio].%(ext)s"
-                        )
-                    } else {
-                        addOption("-f", formatSelector)
-                        addOption("--merge-output-format", "mp4")
-                        addOption(
-                            "-o",
-                            "${targetDir.absolutePath}/%(title).100B [$resolutionTag].%(ext)s"
-                        )
-                    }
-                }
-
-                YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, _ ->
-                    val clamped = progress.coerceIn(0f, 100f)
-                    val etaText = if (etaInSeconds > 0) " • ETA ${etaInSeconds}s" else ""
-                    val status = if (clamped >= 99.5f) {
-                        "Finalizing with FFmpeg..."
-                    } else {
-                        "Downloading ${clamped.roundToInt()}%$etaText"
-                    }
-
-                    _state.value = _state.value.copy(
-                        isDownloading = true,
-                        progress = clamped,
-                        etaSeconds = etaInSeconds,
-                        statusText = status
+                if (isImage && !directImageUrl.isNullOrBlank()) {
+                    downloadDirectImage(
+                        imageUrl = directImageUrl,
+                        title = title,
+                        targetDir = targetDir,
+                        processId = processId
                     )
-
-                    val now = System.currentTimeMillis()
-                    if (now - lastNotifyTime >= 450L || clamped >= 100f) {
-                        lastNotifyTime = now
-                        val manager = getSystemService(NotificationManager::class.java)
-                        manager.notify(
-                            NOTIFICATION_ID_PROGRESS,
-                            buildProgressNotification(
-                                title = title,
-                                subtitle = status,
-                                progress = clamped.roundToInt(),
-                                indeterminate = clamped <= 0f,
-                                processId = processId
+                } else {
+                    val cookiesFile = CookieHelper.getCookiesFileIfValid(this@DownloadService)
+                    val request = YoutubeDLRequest(url).apply {
+                        addOption("--no-mtime")
+                        addOption("--no-playlist")
+                        if (cookiesFile != null) {
+                            addOption("--cookies", cookiesFile.absolutePath)
+                        }
+                        if (isAudioOnly) {
+                            val fmt = audioFormat ?: "mp3"
+                            addOption("-x")
+                            addOption("--audio-format", fmt)
+                            addOption("--audio-quality", "0")
+                            addOption(
+                                "-o",
+                                "${targetDir.absolutePath}/%(title).100B [Audio].%(ext)s"
                             )
+                        } else {
+                            addOption("-f", formatSelector)
+                            addOption("--merge-output-format", "mp4")
+                            addOption(
+                                "-o",
+                                "${targetDir.absolutePath}/%(title).100B [$resolutionTag].%(ext)s"
+                            )
+                        }
+                    }
+
+                    YoutubeDL.getInstance().execute(request, processId) { progress, etaInSeconds, _ ->
+                        val clamped = progress.coerceIn(0f, 100f)
+                        val etaText = if (etaInSeconds > 0) " • ETA ${etaInSeconds}s" else ""
+                        val status = if (clamped >= 99.5f) {
+                            "Finalizing with FFmpeg..."
+                        } else {
+                            "Downloading ${clamped.roundToInt()}%$etaText"
+                        }
+
+                        _state.value = _state.value.copy(
+                            isDownloading = true,
+                            progress = clamped,
+                            etaSeconds = etaInSeconds,
+                            statusText = status
                         )
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastNotifyTime >= 450L || clamped >= 100f) {
+                            lastNotifyTime = now
+                            val manager = getSystemService(NotificationManager::class.java)
+                            manager.notify(
+                                NOTIFICATION_ID_PROGRESS,
+                                buildProgressNotification(
+                                    title = title,
+                                    subtitle = status,
+                                    progress = clamped.roundToInt(),
+                                    indeterminate = clamped <= 0f,
+                                    processId = processId
+                                )
+                            )
+                        }
                     }
                 }
 
@@ -223,6 +246,62 @@ class DownloadService : Service() {
             } finally {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+            }
+        }
+    }
+
+    private fun downloadDirectImage(
+        imageUrl: String,
+        title: String,
+        targetDir: File,
+        processId: String
+    ) {
+        val safeName = title.replace(Regex("[^a-zA-Z0-9._ -]"), "_").take(80).ifBlank { "image" }
+        val ext = when {
+            imageUrl.contains(".png", ignoreCase = true) -> "png"
+            imageUrl.contains(".webp", ignoreCase = true) -> "webp"
+            else -> "jpg"
+        }
+        val outFile = File(targetDir, "${safeName}_${System.currentTimeMillis() % 10000}.$ext")
+
+        val conn = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15000
+            readTimeout = 20000
+            setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            )
+            CookieHelper.getCookieHeaderForUrl(imageUrl)?.let {
+                setRequestProperty("Cookie", it)
+            }
+        }
+
+        conn.connect()
+        if (conn.responseCode !in 200..299) {
+            throw IllegalStateException("HTTP ${conn.responseCode} while downloading image")
+        }
+
+        val total = conn.contentLengthLong
+        var downloaded = 0L
+        val buffer = ByteArray(8192)
+        conn.inputStream.use { input ->
+            FileOutputStream(outFile).use { output ->
+                while (true) {
+                    if (_state.value.processId != processId) {
+                        throw InterruptedException("Cancelled")
+                    }
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    output.write(buffer, 0, read)
+                    downloaded += read
+                    if (total > 0) {
+                        val pct = ((downloaded * 100f) / total).coerceIn(0f, 100f)
+                        _state.value = _state.value.copy(
+                            progress = pct,
+                            statusText = "Downloading ${pct.roundToInt()}%"
+                        )
+                    }
+                }
             }
         }
     }
@@ -308,9 +387,9 @@ class DownloadService : Service() {
         val lower = raw.lowercase()
         return when {
             lower.contains("private") || lower.contains("sign in") || lower.contains("login") ->
-                "This video is private or requires login. Only public links are supported."
+                "Login required. Tap the key icon at the top to sign in to your account and try again."
             lower.contains("unavailable") || lower.contains("404") ->
-                "Video unavailable or removed."
+                "Media unavailable or removed."
             lower.contains("permission") || lower.contains("eacces") ->
                 "Storage permission denied. Please grant storage access and try again."
             else -> "Download error: ${raw.take(140)}"
@@ -331,7 +410,9 @@ class DownloadService : Service() {
         const val EXTRA_RESOLUTION_TAG = "extra_resolution_tag"
         const val EXTRA_FORMAT_SELECTOR = "extra_format_selector"
         const val EXTRA_IS_AUDIO_ONLY = "extra_is_audio_only"
+        const val EXTRA_IS_IMAGE = "extra_is_image"
         const val EXTRA_AUDIO_FORMAT = "extra_audio_format"
+        const val EXTRA_DIRECT_IMAGE_URL = "extra_direct_image_url"
         const val EXTRA_PROCESS_ID = "extra_process_id"
 
         private const val NOTIFICATION_ID_PROGRESS = 1001
@@ -348,7 +429,9 @@ class DownloadService : Service() {
             resolutionTag: String,
             formatSelector: String,
             isAudioOnly: Boolean,
-            audioFormat: String?
+            isImage: Boolean,
+            audioFormat: String?,
+            directImageUrl: String?
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_START
@@ -358,7 +441,9 @@ class DownloadService : Service() {
                 putExtra(EXTRA_RESOLUTION_TAG, resolutionTag)
                 putExtra(EXTRA_FORMAT_SELECTOR, formatSelector)
                 putExtra(EXTRA_IS_AUDIO_ONLY, isAudioOnly)
+                putExtra(EXTRA_IS_IMAGE, isImage)
                 putExtra(EXTRA_AUDIO_FORMAT, audioFormat)
+                putExtra(EXTRA_DIRECT_IMAGE_URL, directImageUrl)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)

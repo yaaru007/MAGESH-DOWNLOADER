@@ -51,7 +51,10 @@ class MainActivity : ComponentActivity() {
                     onClearUrl = viewModel::clearUrl,
                     onFetchClick = viewModel::fetchFormats,
                     onDownloadClick = { option -> ensurePermissionsAndDownload(option) },
-                    onCancelDownload = viewModel::cancelDownload
+                    onCancelDownload = viewModel::cancelDownload,
+                    onUpdateEngineClick = viewModel::updateYtDlp,
+                    onCookiesSaved = viewModel::onCookiesSaved,
+                    onCookiesCleared = viewModel::onCookiesCleared
                 )
             }
         }
