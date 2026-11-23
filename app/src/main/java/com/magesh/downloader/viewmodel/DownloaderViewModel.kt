@@ -180,6 +180,7 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                     val cookiesFile = CookieHelper.getCookiesFileIfValid(getApplication())
                     val request = YoutubeDLRequest(cleanUrl).apply {
                         addOption("--no-playlist")
+                        addOption("--no-warnings")
                         if (cookiesFile != null) {
                             addOption("--cookies", cookiesFile.absolutePath)
                         }
@@ -272,8 +273,31 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     private fun extractInstagramJsonApi(shortcode: String, originalUrl: String): FetchedMedia? {
+        val cookieHeader = CookieHelper.getCookieHeaderForUrl("https://www.instagram.com")
+        val csrfToken = cookieHeader?.split(";")
+            ?.map { it.trim() }
+            ?.firstOrNull { it.startsWith("csrftoken=") }
+            ?.substringAfter("csrftoken=")
+
+        val endpoints = listOf(
+            "https://www.instagram.com/p/$shortcode/?__a=1&__d=dis",
+            "https://www.instagram.com/graphql/query/?doc_id=8845758582119845&variables=%7B%22shortcode%22%3A%22$shortcode%22%7D"
+        )
+
+        for (apiUrl in endpoints) {
+            val parsed = tryFetchInstagramJson(apiUrl, originalUrl, cookieHeader, csrfToken)
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
+    private fun tryFetchInstagramJson(
+        apiUrl: String,
+        originalUrl: String,
+        cookieHeader: String?,
+        csrfToken: String?
+    ): FetchedMedia? {
         return try {
-            val apiUrl = "https://www.instagram.com/p/$shortcode/?__a=1&__d=dis"
             val conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 12000
                 readTimeout = 15000
@@ -284,8 +308,12 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                 )
                 setRequestProperty("X-IG-App-ID", "936619743392459")
                 setRequestProperty("Accept", "application/json")
-                CookieHelper.getCookieHeaderForUrl("https://www.instagram.com")?.let {
-                    setRequestProperty("Cookie", it)
+                setRequestProperty("Referer", "https://www.instagram.com/")
+                if (!csrfToken.isNullOrBlank()) {
+                    setRequestProperty("X-CSRFToken", csrfToken)
+                }
+                if (!cookieHeader.isNullOrBlank()) {
+                    setRequestProperty("Cookie", cookieHeader)
                 }
             }
             conn.connect()
@@ -297,6 +325,7 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
             val items = root.optJSONArray("items")
             val item = items?.optJSONObject(0)
                 ?: root.optJSONObject("graphql")?.optJSONObject("shortcode_media")
+                ?: root.optJSONObject("data")?.optJSONObject("xdt_shortcode_media")
                 ?: return null
 
             val videoUrls = linkedSetOf<String>()
@@ -404,11 +433,13 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
 
             val imageRegexes = listOf(
                 Regex(""""display_url"\s*:\s*"([^"]+)""""),
+                Regex(""""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[^}]*"url"\s*:\s*"([^"]+)""""),
                 Regex("""<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
                 Regex("""<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']""", RegexOption.IGNORE_CASE),
                 Regex("""<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
                 Regex("""<img[^>]+class=["'][^"']*EmbeddedMediaImage[^"']*["'][^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
-                Regex("""<img[^>]+src=["']([^"']+)["'][^>]+class=["'][^"']*EmbeddedMediaImage[^"']*["']""", RegexOption.IGNORE_CASE)
+                Regex("""<img[^>]+src=["']([^"']+)["'][^>]+class=["'][^"']*EmbeddedMediaImage[^"']*["']""", RegexOption.IGNORE_CASE),
+                Regex("""<img[^>]+src=["']([^"']*(?:cdninstagram\.com|fbcdn\.net)[^"']+)["']""", RegexOption.IGNORE_CASE)
             )
             imageRegexes.forEach { regex ->
                 regex.findAll(html).forEach { match ->
@@ -514,7 +545,9 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         return !lower.contains("rsrc.php") &&
             !lower.contains("static.cdninstagram.com/rsrc") &&
             !lower.contains("s150x150") &&
-            !lower.contains("p150x150")
+            !lower.contains("p150x150") &&
+            !lower.contains("t51.2885-19") &&
+            !lower.contains("profile_pic")
     }
 
     private fun decodeEscapedUrl(raw: String): String {
