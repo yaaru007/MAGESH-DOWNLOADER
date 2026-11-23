@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.magesh.downloader.EngineInitState
 import com.magesh.downloader.MageshDownloaderApp
 import com.magesh.downloader.cookies.CookieHelper
+import com.magesh.downloader.cookies.WebViewMediaExtractor
 import com.magesh.downloader.download.DownloadService
 import com.magesh.downloader.model.DownloadProgressState
 import com.magesh.downloader.model.FetchedMedia
@@ -205,6 +206,7 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                     } catch (ytdlError: Exception) {
                         // Fallback for picture posts, carousels, and no-login public Instagram/Facebook media
                         val fallbackMedia = fallbackExtractSocialMedia(cleanUrl)
+                            ?: extractViaWebViewFallback(cleanUrl)
                         fallbackMedia ?: throw ytdlError
                     }
                 }
@@ -246,6 +248,20 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         DownloadService.cancelActiveDownload(
             context = getApplication(),
             processId = downloadState.value.processId
+        )
+    }
+
+    private suspend fun extractViaWebViewFallback(url: String): FetchedMedia? {
+        val extracted = WebViewMediaExtractor.extract(getApplication(), url) ?: return null
+        if (extracted.imageUrls.isEmpty() && extracted.videoUrls.isEmpty()) return null
+        return buildDirectFetchedMedia(
+            originalUrl = url,
+            title = extracted.title.ifBlank {
+                if (extracted.videoUrls.isNotEmpty()) "Video Post" else "Picture Post"
+            },
+            uploader = null,
+            videoUrls = extracted.videoUrls,
+            imageUrls = extracted.imageUrls
         )
     }
 
