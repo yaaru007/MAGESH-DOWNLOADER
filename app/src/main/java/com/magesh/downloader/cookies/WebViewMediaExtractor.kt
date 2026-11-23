@@ -81,6 +81,13 @@ object WebViewMediaExtractor {
                               var vids = Array.from(document.querySelectorAll('video'))
                                 .map(function(v) { return v.currentSrc || v.src || ''; })
                                 .filter(function(s) { return s.indexOf('http') === 0; });
+                              if (vids.length === 0) {
+                                var html = document.documentElement ? document.documentElement.innerHTML : '';
+                                var m = html.match(/"video_url"\s*:\s*"([^"]+)"/);
+                                if (m && m[1]) {
+                                  vids.push(m[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/'));
+                                }
+                              }
                               return JSON.stringify({
                                 title: document.title || '',
                                 images: Array.from(new Set(imgs)),

@@ -204,10 +204,26 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                             formats = options
                         )
                     } catch (ytdlError: Exception) {
-                        // Fallback for picture posts, carousels, and no-login public Instagram/Facebook media
+                        val platform = detectPlatform(cleanUrl)
+                        if (platform == "YouTube") {
+                            throw ytdlError
+                        }
+                        val isLikelyVideoOnlyUrl = cleanUrl.contains("/reel/", ignoreCase = true) ||
+                            cleanUrl.contains("/reels/", ignoreCase = true) ||
+                            cleanUrl.contains("/tv/", ignoreCase = true) ||
+                            cleanUrl.contains("/watch", ignoreCase = true) ||
+                            cleanUrl.contains("/videos/", ignoreCase = true)
+
                         val fallbackMedia = fallbackExtractSocialMedia(cleanUrl)
                             ?: extractViaWebViewFallback(cleanUrl)
-                        fallbackMedia ?: throw ytdlError
+
+                        if (fallbackMedia != null &&
+                            (!isLikelyVideoOnlyUrl || fallbackMedia.formats.any { it.isDirectVideo })
+                        ) {
+                            fallbackMedia
+                        } else {
+                            throw ytdlError
+                        }
                     }
                 }
 
