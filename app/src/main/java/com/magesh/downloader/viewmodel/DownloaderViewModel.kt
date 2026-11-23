@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -201,8 +202,8 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                             formats = options
                         )
                     } catch (ytdlError: Exception) {
-                        // No-login fallback for public Instagram/Facebook reels, videos & picture posts
-                        val fallbackMedia = fallbackExtractPublicSocialMedia(cleanUrl)
+                        // Fallback for picture posts, carousels, and no-login public Instagram/Facebook media
+                        val fallbackMedia = fallbackExtractSocialMedia(cleanUrl)
                         fallbackMedia ?: throw ytdlError
                     }
                 }
@@ -247,23 +248,122 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
         )
     }
 
-    private fun fallbackExtractPublicSocialMedia(url: String): FetchedMedia? {
-        // 1) For Instagram URLs, try the public /embed/captioned/ endpoint first (works without login for many public reels/posts)
+    private fun fallbackExtractSocialMedia(url: String): FetchedMedia? {
         val igShortcode = Regex(
             """instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)""",
             RegexOption.IGNORE_CASE
         ).find(url)?.groupValues?.getOrNull(1)
 
         if (!igShortcode.isNullOrBlank()) {
+            // 1) Try Instagram JSON API (works well with session cookies for photos, carousels & private posts)
+            extractInstagramJsonApi(igShortcode, originalUrl = url)?.let { return it }
+
+            // 2) Try Instagram public embed page (works without login for many public posts & reels)
             val embedUrl = "https://www.instagram.com/p/$igShortcode/embed/captioned/"
-            extractFromHtmlPage(embedUrl, originalUrl = url)?.let { return it }
+            extractFromHtmlPage(embedUrl, originalUrl = url, sendCookies = false)?.let { return it }
+
+            // 3) Try canonical Instagram page with cookies
+            val postUrl = "https://www.instagram.com/p/$igShortcode/"
+            extractFromHtmlPage(postUrl, originalUrl = url, sendCookies = true)?.let { return it }
         }
 
-        // 2) Generic HTML meta/JSON fallback for public Facebook/Instagram/Web links
-        return extractFromHtmlPage(url, originalUrl = url)
+        // 4) Generic HTML meta/JSON fallback for Facebook / Instagram / Web links
+        return extractFromHtmlPage(url, originalUrl = url, sendCookies = true)
     }
 
-    private fun extractFromHtmlPage(fetchUrl: String, originalUrl: String): FetchedMedia? {
+    private fun extractInstagramJsonApi(shortcode: String, originalUrl: String): FetchedMedia? {
+        return try {
+            val apiUrl = "https://www.instagram.com/p/$shortcode/?__a=1&__d=dis"
+            val conn = (URL(apiUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 12000
+                readTimeout = 15000
+                instanceFollowRedirects = true
+                setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                )
+                setRequestProperty("X-IG-App-ID", "936619743392459")
+                setRequestProperty("Accept", "application/json")
+                CookieHelper.getCookieHeaderForUrl("https://www.instagram.com")?.let {
+                    setRequestProperty("Cookie", it)
+                }
+            }
+            conn.connect()
+            if (conn.responseCode !in 200..299) return null
+            val body = conn.inputStream.bufferedReader().use { it.readText() }.trim()
+            if (!body.startsWith("{")) return null
+
+            val root = JSONObject(body)
+            val items = root.optJSONArray("items")
+            val item = items?.optJSONObject(0)
+                ?: root.optJSONObject("graphql")?.optJSONObject("shortcode_media")
+                ?: return null
+
+            val videoUrls = linkedSetOf<String>()
+            val imageUrls = linkedSetOf<String>()
+
+            // New items[] schema
+            fun parseItemNode(node: JSONObject) {
+                node.optJSONArray("video_versions")?.let { vids ->
+                    if (vids.length() > 0) {
+                        vids.optJSONObject(0)?.optString("url")?.takeIf { it.startsWith("http") }?.let {
+                            videoUrls.add(it)
+                        }
+                    }
+                }
+                node.optJSONObject("image_versions2")?.optJSONArray("candidates")?.let { cands ->
+                    if (cands.length() > 0) {
+                        cands.optJSONObject(0)?.optString("url")?.takeIf { it.startsWith("http") }?.let {
+                            imageUrls.add(it)
+                        }
+                    }
+                }
+                node.optString("video_url").takeIf { it.startsWith("http") }?.let { videoUrls.add(it) }
+                node.optString("display_url").takeIf { it.startsWith("http") }?.let { imageUrls.add(it) }
+            }
+
+            parseItemNode(item)
+
+            // Carousel items (items[0].carousel_media)
+            item.optJSONArray("carousel_media")?.let { carousel ->
+                for (i in 0 until carousel.length()) {
+                    carousel.optJSONObject(i)?.let { parseItemNode(it) }
+                }
+            }
+
+            // GraphQL carousel (edge_sidecar_to_children.edges)
+            item.optJSONObject("edge_sidecar_to_children")?.optJSONArray("edges")?.let { edges ->
+                for (i in 0 until edges.length()) {
+                    edges.optJSONObject(i)?.optJSONObject("node")?.let { parseItemNode(it) }
+                }
+            }
+
+            if (videoUrls.isEmpty() && imageUrls.isEmpty()) return null
+
+            val caption = item.optJSONObject("caption")?.optString("text")
+                ?.takeIf { it.isNotBlank() }
+                ?: "Instagram Post"
+            val uploader = item.optJSONObject("user")?.optString("username")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { "@$it" }
+
+            buildDirectFetchedMedia(
+                originalUrl = originalUrl,
+                title = caption,
+                uploader = uploader,
+                videoUrls = videoUrls.toList(),
+                imageUrls = imageUrls.toList()
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractFromHtmlPage(
+        fetchUrl: String,
+        originalUrl: String,
+        sendCookies: Boolean
+    ): FetchedMedia? {
         return try {
             val conn = (URL(fetchUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 12000
@@ -271,10 +371,12 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                 instanceFollowRedirects = true
                 setRequestProperty(
                     "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                 )
-                CookieHelper.getCookieHeaderForUrl(fetchUrl)?.let {
-                    setRequestProperty("Cookie", it)
+                if (sendCookies) {
+                    CookieHelper.getCookieHeaderForUrl(fetchUrl)?.let {
+                        setRequestProperty("Cookie", it)
+                    }
                 }
             }
             conn.connect()
@@ -288,6 +390,7 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
             val videoRegexes = listOf(
                 Regex(""""video_url"\s*:\s*"([^"]+)""""),
                 Regex("""<meta[^>]+property=["']og:video(?::secure_url)?["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+                Regex("""<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:video(?::secure_url)?["']""", RegexOption.IGNORE_CASE),
                 Regex("""<video[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             )
             videoRegexes.forEach { regex ->
@@ -302,16 +405,15 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
             val imageRegexes = listOf(
                 Regex(""""display_url"\s*:\s*"([^"]+)""""),
                 Regex("""<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+                Regex("""<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']""", RegexOption.IGNORE_CASE),
                 Regex("""<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
-                Regex("""class=["']EmbeddedMediaImage["'][^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                Regex("""<img[^>]+class=["'][^"']*EmbeddedMediaImage[^"']*["'][^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+                Regex("""<img[^>]+src=["']([^"']+)["'][^>]+class=["'][^"']*EmbeddedMediaImage[^"']*["']""", RegexOption.IGNORE_CASE)
             )
             imageRegexes.forEach { regex ->
                 regex.findAll(html).forEach { match ->
                     val decoded = decodeEscapedUrl(match.groupValues[1])
-                    if (decoded.startsWith("http") &&
-                        !decoded.contains("rsrc.php") &&
-                        !decoded.contains("static.cdninstagram.com/rsrc")
-                    ) {
+                    if (isValidMediaImageUrl(decoded)) {
                         imageUrls.add(decoded)
                     }
                 }
@@ -323,61 +425,96 @@ class DownloaderViewModel(application: Application) : AndroidViewModel(applicati
                 """<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']""",
                 RegexOption.IGNORE_CASE
             ).find(html)?.groupValues?.getOrNull(1)
+                ?: Regex(
+                    """<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']""",
+                    RegexOption.IGNORE_CASE
+                ).find(html)?.groupValues?.getOrNull(1)
+
             val title = titleMatch?.let {
                 Html.fromHtml(it, Html.FROM_HTML_MODE_LEGACY).toString().trim()
-            }?.takeIf { it.isNotBlank() } ?: if (videoUrls.isNotEmpty()) "Public Video" else "Picture Post"
+            }?.takeIf { it.isNotBlank() } ?: if (videoUrls.isNotEmpty()) "Video Post" else "Picture Post"
 
-            val options = mutableListOf<FormatOption>()
-            videoUrls.firstOrNull()?.let { vUrl ->
-                options.add(
-                    FormatOption(
-                        id = "direct_video_mp4",
-                        label = "Original Quality • MP4",
-                        resolutionTag = "HD",
-                        container = "MP4",
-                        sizeBytes = 0L,
-                        formattedSize = "Direct Stream",
-                        isDirectVideo = true,
-                        directVideoUrl = vUrl
-                    )
-                )
-            }
-
-            imageUrls.forEachIndexed { index, imgUrl ->
-                val label = when {
-                    videoUrls.isNotEmpty() && index == 0 -> "Thumbnail / Cover Picture • JPG"
-                    imageUrls.size == 1 -> "Picture / Image • JPG"
-                    else -> "Picture ${index + 1} • JPG"
-                }
-                if (videoUrls.isEmpty() || index == 0) {
-                    options.add(
-                        FormatOption(
-                            id = "img_$index",
-                            label = label,
-                            resolutionTag = "JPG",
-                            container = "JPG",
-                            sizeBytes = 0L,
-                            formattedSize = "Original Image",
-                            isImage = true,
-                            directImageUrl = imgUrl
-                        )
-                    )
-                }
-            }
-
-            FetchedMedia(
-                sourceUrl = originalUrl,
-                platform = detectPlatform(originalUrl),
+            buildDirectFetchedMedia(
+                originalUrl = originalUrl,
                 title = title,
                 uploader = null,
-                durationSeconds = 0L,
-                thumbnailUrl = imageUrls.firstOrNull(),
-                previewStreamUrl = videoUrls.firstOrNull(),
-                formats = options
+                videoUrls = videoUrls.toList(),
+                imageUrls = imageUrls.toList()
             )
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun buildDirectFetchedMedia(
+        originalUrl: String,
+        title: String,
+        uploader: String?,
+        videoUrls: List<String>,
+        imageUrls: List<String>
+    ): FetchedMedia {
+        val options = mutableListOf<FormatOption>()
+
+        videoUrls.forEachIndexed { index, vUrl ->
+            val label = if (videoUrls.size == 1) {
+                "Original Quality • MP4"
+            } else {
+                "Video ${index + 1} • MP4"
+            }
+            options.add(
+                FormatOption(
+                    id = "direct_video_$index",
+                    label = label,
+                    resolutionTag = "HD",
+                    container = "MP4",
+                    sizeBytes = 0L,
+                    formattedSize = "Direct Stream",
+                    isDirectVideo = true,
+                    directVideoUrl = vUrl
+                )
+            )
+        }
+
+        imageUrls.forEachIndexed { index, imgUrl ->
+            val label = when {
+                videoUrls.isNotEmpty() && index == 0 && imageUrls.size == 1 ->
+                    "Thumbnail / Cover Picture • JPG"
+                imageUrls.size == 1 -> "Picture / Image • JPG"
+                else -> "Picture ${index + 1} • JPG"
+            }
+            options.add(
+                FormatOption(
+                    id = "img_$index",
+                    label = label,
+                    resolutionTag = "JPG",
+                    container = "JPG",
+                    sizeBytes = 0L,
+                    formattedSize = "Original Image",
+                    isImage = true,
+                    directImageUrl = imgUrl
+                )
+            )
+        }
+
+        return FetchedMedia(
+            sourceUrl = originalUrl,
+            platform = detectPlatform(originalUrl),
+            title = title,
+            uploader = uploader,
+            durationSeconds = 0L,
+            thumbnailUrl = imageUrls.firstOrNull(),
+            previewStreamUrl = videoUrls.firstOrNull(),
+            formats = options
+        )
+    }
+
+    private fun isValidMediaImageUrl(url: String): Boolean {
+        if (!url.startsWith("http")) return false
+        val lower = url.lowercase()
+        return !lower.contains("rsrc.php") &&
+            !lower.contains("static.cdninstagram.com/rsrc") &&
+            !lower.contains("s150x150") &&
+            !lower.contains("p150x150")
     }
 
     private fun decodeEscapedUrl(raw: String): String {
