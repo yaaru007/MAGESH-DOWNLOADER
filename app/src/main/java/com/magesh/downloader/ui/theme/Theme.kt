@@ -5,22 +5,32 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
+val BrandCrimson = Color(0xFFE11D48)
+val BrandPinkGlow = Color(0xFFF43F5E)
+val BrandAmber = Color(0xFFFACC15)
+val BrandViolet = Color(0xFF8B5CF6)
+val BrandEmerald = Color(0xFF10B981)
+
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFF10B981),
-    onPrimary = Color(0xFF04291D),
-    primaryContainer = Color(0xFF064E3B),
-    onPrimaryContainer = Color(0xFFA7F3D0),
-    secondary = Color(0xFF38BDF8),
-    onSecondary = Color(0xFF082F49),
-    background = Color(0xFF0B1117),
-    onBackground = Color(0xFFE6EDF3),
-    surface = Color(0xFF121A22),
-    onSurface = Color(0xFFE6EDF3),
-    surfaceVariant = Color(0xFF1B2632),
-    onSurfaceVariant = Color(0xFF9FB0C0),
+    primary = BrandPinkGlow,
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFF4C0519),
+    onPrimaryContainer = Color(0xFFFFE4E6),
+    secondary = BrandViolet,
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFF2E1065),
+    onSecondaryContainer = Color(0xFFEDE9FE),
+    tertiary = BrandAmber,
+    onTertiary = Color(0xFF1E1B0A),
+    background = Color(0xFF090710),
+    onBackground = Color(0xFFF3F4F6),
+    surface = Color(0xFF13101E),
+    onSurface = Color(0xFFF3F4F6),
+    surfaceVariant = Color(0xFF1D182C),
+    onSurfaceVariant = Color(0xFFA8A2C0),
     error = Color(0xFFF87171),
     onError = Color(0xFF450A0A),
-    outline = Color(0xFF2D3B49)
+    outline = Color(0xFF322B4A)
 )
 
 @Composable

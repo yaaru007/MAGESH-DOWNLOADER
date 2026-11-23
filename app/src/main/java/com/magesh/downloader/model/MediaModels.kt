@@ -11,8 +11,10 @@ data class FormatOption(
     val formattedSize: String,
     val isAudioOnly: Boolean = false,
     val isImage: Boolean = false,
+    val isDirectVideo: Boolean = false,
     val audioFormat: String? = null,
     val directImageUrl: String? = null,
+    val directVideoUrl: String? = null,
     val formatSelector: String = "best"
 )
 
