@@ -159,7 +159,7 @@ fun DownloaderScreen(
                             modifier = Modifier.weight(1f)
                         ) {
                             Image(
-                                painter = painterResource(id = R.mipmap.ic_launcher),
+                                painter = painterResource(id = R.drawable.app_logo),
                                 contentDescription = "MAGESH DOWNLOADER",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
